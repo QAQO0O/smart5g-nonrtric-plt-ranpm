@@ -84,7 +84,7 @@ spec:
         # Timestamp shall be given with date.time where minutes has values 00,15,45 and the given timezone
         # Example: 20230220.1300 - denotes a first file name of 20230220.1300+0100-1315+0100_<node-name>.xml.gz
         - name: GENERATED_FILE_START_TIME
-          value: "20230915.070000"
+          value: "20230515.0700"
         # Timezone to use for generated files. If not given, timezone 0000 will be used
         # Shall include +/- sign for the timezone value
         - name: GENERATED_FILE_TIMEZONE

@@ -16,5 +16,5 @@
 #
 
 global:
-  extimagerepo: localhost:5000/
+  extimagerepo: phoenix-artifactory.maven.etb.tieto.com/tieto/nwa_demo/ranpm/
   numhttpsservers: 10

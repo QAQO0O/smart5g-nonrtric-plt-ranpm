@@ -176,7 +176,7 @@ echo ""
 
 echo "Wait for SDN Controller"
 _ts=$SECONDS
-until $(wget --no-verbose --tries=1 --spider http://localhost:31769/ready); do
+until $(wget --no-verbose --tries=1 --spider http://$KUBERNETESHOST:31769/ready); do
     echo -ne "  $(($SECONDS-$_ts)) sec, retrying at $(($SECONDS-$_ts+5)) sec                        $SAMELINE"
     sleep 5
 done

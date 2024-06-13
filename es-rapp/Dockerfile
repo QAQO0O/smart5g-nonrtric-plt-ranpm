@@ -23,5 +23,4 @@ COPY requirements.txt .
 RUN pip install -r /app/requirements.txt
 
 COPY main.py .
-USER nonroot
 ENTRYPOINT ["python", "main.py"]
