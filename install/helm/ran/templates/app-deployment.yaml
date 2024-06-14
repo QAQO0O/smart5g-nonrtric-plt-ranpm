@@ -89,6 +89,10 @@ spec:
         # Shall include +/- sign for the timezone value
         - name: GENERATED_FILE_TIMEZONE
           value: "+0100"
+        - name: UTG1_CLI_ADDRESS
+          value: "192.168.3.165"
+        - name: UTG1_CLI_PORT
+          value: "31004"
         volumeMounts:
         - name: cert-vol
           mountPath: /certs

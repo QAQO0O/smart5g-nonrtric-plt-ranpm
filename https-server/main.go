@@ -28,13 +28,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"encoding/csv"
 
+	"encoding/json"
+	"regexp"
+	"net"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/gorilla/mux"
 
 	"net/http/pprof"
+
+	//zmq "github.com/pebbe/zmq4"
 )
 
 //== Constants ==//
@@ -52,11 +56,160 @@ const scenario_data_file = "demo_data.csv"
 var always_return_file = os.Getenv("ALWAYS_RETURN")
 var generated_files_start_time = os.Getenv("GENERATED_FILE_START_TIME")
 var generated_files_timezone = os.Getenv("GENERATED_FILE_TIMEZONE")
+var utg1_cli_address = os.Getenv("UTG1_CLI_ADDRESS")
+var utg1_cli_port = os.Getenv("UTG1_CLI_PORT")
 
 var unzipped_template = ""
 
-var scenario_data [][]string
-var scenario_data_idx = 0
+var prb_value int = 10
+
+type record struct {
+        EnbId           int `json:"enbId"`
+        CellId          int `json:"cellId"`
+        //Actual_datarate int `json:"actual_datarate"`
+        Actual_datarate int `json:"set_datarate"`
+}
+
+// testbed data are in format:
+// "eid1,cid1,datarate1,eid2,cid2,datarate2,...,eidN,cidN,datarateN,"
+func parseTestbedData(testbeddatas []string) []record {
+	records := make([]record, len(testbeddatas))
+        for i, s := range testbeddatas {
+                jsonString := s[:strings.Index(s, "OK")]
+		jsonString = strings.TrimPrefix(jsonString, "utg#")
+                re := regexp.MustCompile(`\s+`)
+                jsonString = re.ReplaceAllString(jsonString, "")
+
+                log.Info("jsonString:", jsonString)
+                var datarecord record
+                err := json.Unmarshal([]byte(jsonString), &datarecord)
+                if err != nil {
+                        // may consider better error handling
+                        log.Error("Error parsing JSON: ", err)
+                        continue
+                }
+                log.Info(datarecord)
+                records[i] = datarecord
+        }
+        return records
+}
+
+func getTestbedData(cell_ids []string) []string {
+        command1 := "get datarate 1 " + cell_ids[0] + "\n"
+        command2 := "get datarate 1 " + cell_ids[1] + "\n"
+
+        var testbeddata []string
+	zmq_address := utg1_cli_address + ":" + utg1_cli_port
+        socket, err := net.Dial("tcp", zmq_address)
+        if err != nil {
+                // may consider better error handling
+		log.Error("Create socket failed: ", err)
+                return testbeddata
+        }
+        defer socket.Close()
+
+        socket.SetReadDeadline(time.Now().Add(5 * time.Second))
+        socket.SetWriteDeadline(time.Now().Add(5 * time.Second))
+
+        buffer := make([]byte, 1024)
+
+        n, err := socket.Read(buffer)
+        if err != nil {
+                // may consider better error handling
+                log.Error("Receiving ZMQ message failed")
+                return testbeddata
+        }
+        if strings.Contains(string(buffer[:n]), "# ") {
+                log.Info("Received byte size ", n, "and message \n", string(buffer[:n]))
+        } else {
+                return testbeddata
+        }
+
+        _, err = socket.Write([]byte(command1))
+        if err != nil {
+                // may consider better error handling
+                log.Error("Failed to send command: %v", err)
+                return testbeddata
+        }
+
+        response, err := bufio.NewReader(socket).ReadString('\n')
+        if err != nil {
+                // may consider better error handling
+                log.Error("Receiving ZMQ message failed")
+                return testbeddata
+        }
+
+        if len(response) > 0 {
+                log.Info("getTestbedData for uesim utg:", response)
+                testbeddata = append(testbeddata, response)
+        }
+
+	_, err = socket.Write([]byte(command2))
+        if err != nil {
+                // may consider better error handling
+                log.Error("Failed to send command: %v", err)
+                return testbeddata
+        }
+
+        response2, err := bufio.NewReader(socket).ReadString('\n')
+        if err != nil {
+                // may consider better error handling
+                log.Error("Receiving command response failed")
+                return testbeddata
+        }
+
+        if len(response2) > 0 {
+                log.Info("getTestbedData for uesim utg:", response2)
+                testbeddata = append(testbeddata, response2)
+        }
+
+        return testbeddata
+}
+
+
+
+// maps cell_id to [cell_max, cell_prev]
+var data = make(map[string][]int)
+
+// takes cellIds and returns PRB usage for them
+// PRB Usage calculated as current_datarate/max_datarate for a given cell
+func getPrbUsage(cell_ids []string) []string {
+	testbed_data := getTestbedData(cell_ids)
+	// update cache with current data
+	if len(testbed_data) != 0 {
+		records := parseTestbedData(testbed_data)
+		for _, r := range records {
+			current_datarate := r.Actual_datarate
+			cellid := strconv.Itoa(r.CellId)
+
+			_, ok := data[cellid]
+			if ok == false {
+				data[cellid] = make([]int, 2)
+				data[cellid][0] = current_datarate
+			} else {
+				if data[cellid][0] < current_datarate {
+					data[cellid][0] = current_datarate
+				}
+			}
+			data[cellid][1] = current_datarate
+		}
+	}
+	// get data for requested cells
+	prbs := make([]string, len(cell_ids))
+	for i, cell_id := range cell_ids {
+		prb := "0"
+		cell_data, ok := data[cell_id]
+		if ok == true {
+			if cell_data[0] == 0 {
+				prb = "0"
+			} else {
+				prb = strconv.Itoa(cell_data[1] * 100 / cell_data[0])
+			}
+		}
+		prbs[i] = prb
+	}
+	return prbs
+}
 
 // Get static file
 // Returned file is based on configuration
@@ -251,34 +404,10 @@ func generatedfiles(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-
 func scenario(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
-	}
-
-	// load scenario data on a first execution
-	if len(scenario_data) == 0 {
-
-		fn := scenario_files + "/" + scenario_data_file
-		f, err := os.Open(fn)
-		if err != nil {
-			log.Fatal("Unable to read input file " + fn, err)
-		}
-		defer f.Close()
-
-		csvReader := csv.NewReader(f)
-		_, err = csvReader.Read() // discard first line
-		if err != nil {
-			log.Fatal("Unable to parse file as CSV for " + fn, err)
-			return
-		}
-		scenario_data, err = csvReader.ReadAll()
-		if err != nil {
-			log.Fatal("Unable to parse file as CSV for " + fn, err)
-			return
-		}
 	}
 
 	vars := mux.Vars(req)
@@ -334,13 +463,14 @@ func scenario(w http.ResponseWriter, req *http.Request) {
 		tend := tcur.Add(d)
 		endtime := tend.Format("2006-01-02T15:04:05") + timezone
 
-		//get counter values from scenario file - pmDlPrbUsage
-		ctr_value_1 := scenario_data[scenario_data_idx][0]
-		ctr_value_2 := scenario_data[scenario_data_idx][1]
-		scenario_data_idx++;
-		if scenario_data_idx >= len(scenario_data) {
-			scenario_data_idx = 0
-		}
+		//get counter values from testbed's zmq
+		cell_ids := []string{"1", "2"}
+		prb_data := getPrbUsage(cell_ids)
+		log.Info("PRBUsage data:", prb_data)
+
+		ctr_value_1 := prb_data[0]
+		//ctr_value_1 := "10"
+		ctr_value_2 := prb_data[1]
 
 		//get counter values from ransim  - pmRrcConnectedUes
 		//dummy values for now
@@ -355,11 +485,16 @@ func scenario(w http.ResponseWriter, req *http.Request) {
 
 		log.Debug("Replacing BEGINTIME with: ", begintime)
 		log.Debug("Replacing ENDTIME with: ", endtime)
+		//log.Debug("Replacing 14550001 with: ", cell_ids[0])
+		//log.Debug("Replacing 1454c001 with: ", cell_ids[1])
 		log.Debug("Replacing CTR_VALUE_1 with: ", ctr_value_1)
 		log.Debug("Replacing CTR_VALUE_2 with: ", ctr_value_2)
 		log.Debug("Replacing CTR_VALUE_3 with: ", ctr_value_3)
 		log.Debug("Replacing CTR_VALUE_4 with: ", ctr_value_4)
 		log.Debug("Replacing NODE_NAME with: ", nodename)
+
+                //template_string = strings.Replace(template_string, "14550001", cell_ids[0], -1)
+                //template_string = strings.Replace(template_string, "1454c001", cell_ids[1], -1)
 
 		template_string = strings.Replace(template_string, "BEGINTIME", begintime, -1)
 		template_string = strings.Replace(template_string, "ENDTIME", endtime, -1)

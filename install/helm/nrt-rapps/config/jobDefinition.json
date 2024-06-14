@@ -5,6 +5,18 @@
    "job_definition": {
       "kafkaOutputTopic": "",
       "filterType": "pmdata",
-      "filter": []
+      "filter": {
+         "sourceNames": [],
+         "measObjInstIds": [],
+         "measTypeSpecs": [
+            {
+               "measuredObjClass": "NRCellDU",
+               "measTypes": [
+                 "pmCellPrbTotDl"
+               ]
+            }
+         ],
+         "measuredEntityDns": []
+      }
    }
 }

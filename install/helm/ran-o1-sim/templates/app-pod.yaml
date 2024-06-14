@@ -88,6 +88,10 @@ spec:
       value: "sample1"
     - name: NTS_NF_STANDALONE_START_FEATURES
       value: datastore-populate ves-heartbeat ves-file-ready ves-file-ready-periodic ves-pnf-registration web-cut-through netconf-call-home
+    - name: UESIM_CLI_ADDRESS
+      value: "192.168.3.165"
+    - name: UESIM_CLI_PORT
+      value: "31001"
     volumeMounts:
     - name: config-json
       mountPath: /opt/dev/ntsim-ng/config/config.json

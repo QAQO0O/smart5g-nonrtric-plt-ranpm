@@ -66,6 +66,7 @@ FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 logging.basicConfig(format=FORMAT)  # , stream=sys.stdout
 log.setLevel(logging.INFO)
 log.info(f'rApp START')
+allow_disabled = [True, False]
 
 class States(Enum):
     ENABLED = 1
@@ -84,10 +85,10 @@ class Application:
         self.source_name = ""
         self.meas_entity_dist_name = ""
 
-        self.prb_history = []
-        self.switch_off = False
-        self.index = 0
-        self.load_predictor = 'http://' + os.environ['LOAD_PREDICTOR'] + ':' + os.environ['LOAD_PREDICTOR_PORT'] + '/' + os.environ['LOAD_PREDICTOR_API']
+        # self.prb_history = []
+        # self.switch_off = False
+        # self.index = 0
+        # self.load_predictor = 'http://' + os.environ['LOAD_PREDICTOR'] + ':' + os.environ['LOAD_PREDICTOR_PORT'] + '/' + os.environ['LOAD_PREDICTOR_API']
 
         self.a1_url = 'http://' + os.environ['A1T_ADDRESS'] + ':' + os.environ['A1T_PORT']
         self.ransim_data_path = os.environ['RANSIM_DATA_PATH']
@@ -97,17 +98,22 @@ class Application:
         self.sdn_controller_auth = (os.environ['SDN_CONTROLLER_USERNAME'], os.environ['SDN_CONTROLLER_PASSWORD'])
         
     def work(self):
-        policies = self.get_policies()
-        if policies is None:
-            log.error('Unable to connect to A1.')
-            return
+        # policies = self.get_policies()
+        # if policies is None:
+        #     log.error('Unable to connect to A1.')
+        #     return
 
-        self.delete_policy()
 
-        self.fetch_cell_urls()
-        if not self.cell_urls:
+        # # legacy judge, need?
+        # # for policy in policies:
+        # #     # assumed that all policies with ID >= 1000 are from this rApp
+        # #     if int(policy) >= 1000:
+        # self.delete_policy()
+
+        payload = self.fetch_cell_urls()
+        if payload is None:
             log.error('Unable to fetch cell URLs')
-            return
+        #    return
 
         while True:
             time.sleep(self.sleep_time_sec)
@@ -116,7 +122,8 @@ class Application:
             if not data:
                 log.info('No data')
                 continue
-
+            
+            log.info('update_local_data')
             self.update_local_data(data)
 
             if time.time() >= self.ready_time:
@@ -140,43 +147,31 @@ class Application:
 
     def update_local_data(self, data):
         report_type = data['event']['perf3gppFields']['measDataCollection']['measuredEntityDn']
-        if "Cell" not in report_type:
-            log.info('Received report is not a Cell report')
-            return
-
         self.source_name = data['event']['commonEventHeader']['sourceName']
         self.meas_entity_dist_name = report_type
 
-        cells = data['event']['perf3gppFields']['measDataCollection']['measInfoList']
+        cells = data['event']['perf3gppFields']['measDataCollection']['measInfoList'][0]['measValuesList']
 
         if not cells:
             log.warning("PM report is lacking measurements")
             return
 
         for index, cell in enumerate(cells):
-            cId = str(cell['measInfoId']['sMeasInfoId'])
+            cId = str(cell['measObjInstId'].partition("NRCellDU=")[-1])
 
-            p = -1
-            types_list = cell['measTypes']['sMeasTypesList']
-            for index_types, pm_type in enumerate(types_list):
-                if pm_type == 'RRU.PrbTotDl':
-                    p = index_types
-                    break
-
-            if p == -1:
-                log.error('PM type RRU.PrbTotDl not present')
-                return
-
-            sValue = cell['measValuesList'][0]['measResults'][p]['sValue']
+            sValue = cell['measResults'][0]['sValue']
 
             if cId not in self.cells:
                 self.cells[cId] = {
                     "id": cId,
-                    "state": States.ENABLED,
+                    "allow_disabled": allow_disabled[index],
+                    "state": States.ENABLED if float(cell['measResults'][0]['sValue']) > 0.0 else States.DISABLED,
                     "prb_usage": np.nan * np.zeros((self.avg_slots, )),
                     "avg_prb_usage": np.nan,
                     "policy_list": []
                 }
+                if self.cells[cId]['state'] == States.ENABLED:
+                    self.toggle_cell_administrative_state(cId, locked=False)
 
             store = self.cells[cId]
             store['prb_usage'] = np.roll(store['prb_usage'], 1)
@@ -190,77 +185,125 @@ class Application:
             cell = self.cells[key]
             status += f'{cell["id"]}: {cell["avg_prb_usage"]:.3f}, '
         status = status[:-2] + "] avg: "
-        avg_prb = sum(self.cells[cell]["avg_prb_usage"] for cell in self.cells) / sum((self.cells[cell]['state'] != States.DISABLED) for cell in self.cells)
-        status += f'{avg_prb:.3f}'
-        # Maintain history of the prb usage. This is used for querying the model.
-        if not np.isnan(avg_prb):
-            self.prb_history.append(int(avg_prb))
-            log.info(f'New Value {(avg_prb)}')
+        try:
+            avg_prb = sum(self.cells[cell]["avg_prb_usage"] for cell in self.cells) / sum((self.cells[cell]['state'] != States.DISABLED) for cell in self.cells)
+        except ZeroDivisionError:
+            log.info("ZeroDivisionError: no prb usage")
         else:
-            self.prb_history.append(40)
-        energy_all = (300 + 4 * 150) / 1e3
-        energy = (300 + (sum((self.cells[cell]['state'] != States.DISABLED) for cell in self.cells) - 1) * 150) / 1e3
-        energy_per_day = 24 * energy
-        energy_save = (energy_all - energy) * 24
-        status += f' (energy consumption: {energy:.2f}/{energy_all:.2f} W; per day: {energy_per_day:.2f} Wh; per day savings: {energy_save:.2f} Wh)'
-        log.info(status)
+            status += f'{avg_prb:.3f}'
+            energy_all = (300 + 4 * 150) / 1e3
+            energy = (300 + (sum((self.cells[cell]['state'] != States.DISABLED) for cell in self.cells) - 1) * 150) / 1e3
+            energy_per_day = 24 * energy
+            energy_save = (energy_all - energy) * 24
+            status += f' (energy consumption: {energy:.2f}/{energy_all:.2f} W; per day: {energy_per_day:.2f} Wh; per day savings: {energy_save:.2f} Wh)'
+            log.info(status)
 
     def make_decision(self) :
-        if len(self.prb_history) < 10:
-            log.error("Insufficient data to make a prediction")
+        data = []
+        for i, key in enumerate(self.cells.keys()):
+            record = [None] * 3
+            record[0] = self.cells[key]['id']
+            record[1] = self.cells[key]['avg_prb_usage']
+            record[2] = self.cells[key]['state']
+            data.append(record)
+
+        if any(np.nan in record for record in data):
             return
 
-        headers = {'Content-Type': 'application/json', 'Accept':'application/json'}
-        l1 = self.prb_history[:]
-        l1.append(self.index%144)
-        self.index = self.index + 1
-        l1.append(0)
-        l = json.dumps(l1)
-        rsp = requests.post(self.load_predictor, headers= headers, json=l)
-        r1 = rsp.json()
-        log.info(f'Query - {l1}')
-        prd = 0
-        i = 0
-        self.prb_history = self.prb_history[5:]
-        # Convert the prediction from string to int
-        while True: 
-            if r1[0][i] == " " or r1[0][i] == "." :
-                break
-            prd = prd*10 + int(r1[0][i])
-            i = i+1
+        total_prb_usage = sum(record[1] for record in data)
+        enabled_cells = sum((record[2] != States.DISABLED) for record in data)
+        disabling_cell = sum((record[2] == States.DISABLING) for record in data)
 
-        log.info(f'Predicted load - {prd}')
-        # Hardcoding the cell-id here.
-        cell_id = "1454c001"
-        if prd < 80 and self.switch_off == False:
-            #Switch off capacity cell
-            self.cells[cell_id]['state'] = States.DISABLING
-            self.send_command_disable_cell(cell_id)
-            self.switch_off = True
-        elif prd > 80 and self.switch_off == True:
-            #Switch On capacity cell
-            self.cells[cell_id]['state'] = States.ENABLED
-            self.toggle_cell_administrative_state(cell_id, locked=False)
-            self.send_command_enable_cell(cell_id)
-            self.switch_off = False
+        log.info(f'Checking if a cell should be switched off')
+        for record in data:
+            if record[2] == States.DISABLING:
+                cell_id = record[0]
+                self.toggle_cell_administrative_state(cell_id, locked=True)
+                self.cells[cell_id]['state'] = States.DISABLED
+                enabled_cells-=1
+
+        current_avg_prb_usage = total_prb_usage / enabled_cells
+
+        log.info(f'Making decision...')
+        log.info(f'Current average PRB usage: {current_avg_prb_usage}')
+        if (max(record[1] for record in data) > 40) and (current_avg_prb_usage > 30):
+            log.info('Max and average PRB usage above thresholds - trying to enable one cell.')
+            self.enable_one_cell()
+        elif (current_avg_prb_usage < 20) and (disabling_cell == 0):
+            log.info('Average PRB usage below threshold - trying to disable one cell.')
+            future_avg_prb_usage = total_prb_usage / (enabled_cells - 1)
+            log.info(f'Expected PRB usage {future_avg_prb_usage}.')
+            self.disable_one_cell()
+        else:
+            log.info('Make cell on/off decision - no action - balance achieved.')
 
     def toggle_cell_administrative_state(self, cell_id, locked):
+        # cell_id is 9 hex digits
+        string_cell_id = '{}'.format(cell_id)
+        while len(string_cell_id) < 9:
+            string_cell_id = '0' + string_cell_id
+        full_cell_id = '138426{}'.format(string_cell_id)
+        # full_cell_id = '{}'.format(cell_id)
         sOff='off' if locked else 'on'
-        log.info(f'Switching {sOff} cell {cell_id}')
-        path_base = '/O1/CM/'
-        path_tail = self.cell_urls[cell_id]
-        url = 'http://' + self.sdn_controller_address + ':' + self.sdn_controller_port + path_base + path_tail
-        payload = { "attributes": {"administrativeState": "LOCKED" if locked else "UNLOCKED"} }
-        response = requests.put(url, auth=self.sdn_controller_auth, json=payload)
+        log.info(f'Switching {sOff} cell {full_cell_id}')
+        path_base = '/rests/data/network-topology:network-topology/topology=topology-netconf'
+        path_tail = '/node={node}/yang-ext:mount/o-ran-sc-du-hello-world:network-function/distributed-unit-functions={duf}/cell={cell}/administrative-state'
+        url = 'http://' + self.sdn_controller_address + ':' + self.sdn_controller_port + path_base + path_tail.format(node=self.source_name, duf=self.meas_entity_dist_name, cell=full_cell_id)
+        log.info(f'{url}')
+        headers = {
+            'Accept': 'application/yang-data+json',
+            'Content-Type': 'application/yang-data+json'
+        }
+        payload = {"administrative-state": "locked" if locked else "unlocked"}
+        response = requests.put(url, verify=False, auth=self.sdn_controller_auth, json=payload, headers=headers)
         log.info(f'Cell-{sOff} response status:{response.status_code}')
 
-    
+    def enable_one_cell(self):
+        options = []
+        for key in self.cells.keys():
+            option = [None] * 3
+            option[0] = self.cells[key]['id']
+            option[1] = self.cells[key]['avg_prb_usage']
+            option[2] = (self.cells[key]['state'] == States.DISABLED) and self.cells[key]['allow_disabled']
+            options.append(option)
+
+        options_filtered = [option for option in options if option[2] == True]
+        if len(options_filtered) == 0:
+            log.info('There are no cells that could be enabled...')
+            return
+
+        cell_id = random.choice(options)[0]
+        self.cells[cell_id]['state'] = States.ENABLED
+        log.info(f'enable cell with cell_id {cell_id}')
+        self.toggle_cell_administrative_state(cell_id, locked=False)
+        # self.send_command_enable_cell(cell_id)
+
     def send_command_enable_cell(self, cell_id):
         log.info(f'Enabling cell with id {cell_id}')
-        self.delete_policy()
+        for policy in self.cells[cell_id]['policy_list']:
+            self.delete_policy(str(policy))
         self.cells[cell_id]['policy_list'] = []
 
-    
+    def disable_one_cell(self):
+        options = []
+        for key in self.cells.keys():
+            option = [None] * 3
+            option[0] = self.cells[key]['id']
+            option[1] = self.cells[key]['avg_prb_usage']
+            option[2] = (self.cells[key]['state'] == States.ENABLED) and self.cells[key]['allow_disabled']
+            options.append(option)
+
+        options_filtered = [option for option in options if option[2] == True]
+        if len(options_filtered) == 0:
+            log.info('There are no cells that could be disabled...')
+            return
+
+        ind = sorted(options_filtered, key=itemgetter(1))[0]
+        cell_id = ind[0]
+        self.cells[cell_id]['state'] = States.DISABLING
+        log.info(f'disable cell with cell_id {cell_id}')
+        # self.send_command_disable_cell(cell_id)
+
     def send_command_disable_cell(self, cell_id):
         log.info(f'Disabling cell with id {cell_id}')
         current_policies = self.get_policies()
@@ -307,29 +350,25 @@ class Application:
             return None
 
     def fetch_cell_urls(self):
-        ## TBUpdated: fetch managedelement id instead of hardcoded value
-        path_base = '/O1/CM/ManagedElement=1193046'
+        path_base = '/rests/data/network-topology:network-topology/topology=topology-netconf'
         url = 'http://' + self.sdn_controller_address + ':' + self.sdn_controller_port + path_base
+        headers = {
+            'Accept': 'application/yang-data+json',
+            'Content-Type': 'application/yang-data+json'
+        }
+
         try:
-            response = requests.get(url, auth=self.sdn_controller_auth).json()
-            gnb_du_function = response['GnbDuFunction']
-
-            for data in gnb_du_function:
-                for cell_du in data['NrCellDu']:
-                    cell_name = cell_du['viavi-attributes']['cellName']
-                    url = cell_du['objectInstance']
-                    self.cell_urls[cell_name] = url
-
+            response = requests.get(url, auth=self.sdn_controller_auth, headers=headers)
+            log.info(response)
             return response
         except Exception as ex:
             log.error(ex)
             return None
 
-
 if __name__ == '__main__':
     app = Application(
-        sleep_time_sec=10.0,
-        sleep_after_decision_sec=120.0,
-        avg_slots=5
+        sleep_time_sec=1.0,
+        sleep_after_decision_sec=10.0,
+        avg_slots=10
     )
     app.work()

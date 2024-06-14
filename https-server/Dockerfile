@@ -20,6 +20,10 @@ FROM golang:1.20.3-buster AS build
 WORKDIR /app
 
 COPY main.go .
+
+# 安装 ZeroMQ
+RUN apt-get update && apt-get install -y libzmq3-dev
+
 RUN go mod init main
 RUN go mod tidy
 
@@ -28,6 +32,7 @@ RUN go build -o /pm-https-server
 #Replaced distroless image with ubuntu for debug purposes
 #FROM gcr.io/distroless/base-debian11
 FROM ubuntu
+RUN apt-get update && apt-get install -y libzmq3-dev
 WORKDIR /
 ## Copy from "build" stage
 COPY --from=build /pm-https-server .

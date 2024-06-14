@@ -78,17 +78,17 @@ spec:
     {{- end }}
     env:
     - name: SDN_CONTROLLER_ADDRESS
-      value: "172.17.0.1"
+      value: "controller.nonrtric"
     - name: SDN_CONTROLLER_PORT
-      value: "80"
+      value: "8181"
     - name: SDN_CONTROLLER_USERNAME
-      value: "root"
+      value: "admin"
     - name: SDN_CONTROLLER_PASSWORD
-      value: "viavi"
+      value: "Kp8bJ4SXszM0WXlhak3eHlcse2gAw84vaoGGmJvUy2U"
     - name: A1T_ADDRESS
-      value: "172.17.0.1"
+      value: "onos-a1t.riab"
     - name: A1T_PORT
-      value: "80"
+      value: "9639"
     - name: LOAD_PREDICTOR
       value: "dummy"
     - name: LOAD_PREDICTOR_PORT
